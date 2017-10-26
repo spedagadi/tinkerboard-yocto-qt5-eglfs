@@ -1,16 +1,16 @@
-Rockchip Yocto BSP
-===============================
+# Tinkerboard - QT5 Yocto (Console based)
 
-Quick Start Guide
------------------
+This is a console based Yocto QT5 image for Tinkerboard using eglfs for rendering
 
-Once you have downloaded the source of all projects, you will have to
-call:
+# To build a fresh Yocto image, browse to the cloned directory, then type
 
-$: machine=<MACHINE> DISTRO=<DISTRO> . ./setup-environment -b <build_dir>
+   $ . ./setup-environment
+   $ bitbake core-image-console
+   
+The build/local.conf file in this repo adds a number of QT5 libraries and applications. All the example apps can be found under /usr/share/
+To run each of the example apps pass **-platform eglfs** as additonal argument. 
 
-After this step, you will be with everything need for build an image.
+EG:
 
-To get more info, see at
-
-   http://opensource.rock-chips.com/wiki_Yocto
+   $ cd /usr/share/cinematicexperience-1.0
+   $  ./Qt5_CinematicExperience -platform eglfs
