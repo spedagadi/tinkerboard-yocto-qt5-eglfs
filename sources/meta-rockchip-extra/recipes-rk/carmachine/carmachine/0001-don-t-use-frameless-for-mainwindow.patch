@@ -1,0 +1,37 @@
+From ec14a4a223945cfa46ea028218d69a76e9b0e1d0 Mon Sep 17 00:00:00 2001
+From: Jacob Chen <jacob2.chen@rock-chips.com>
+Date: Thu, 13 Jul 2017 10:15:27 +0800
+Subject: [PATCH] don't use frameless for mainwindow
+
+it will make x11 display worng
+---
+ mainWindows/main.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/mainWindows/main.cpp b/mainWindows/main.cpp
+index b7610a3..c2d9ee1 100644
+--- a/mainWindows/main.cpp
++++ b/mainWindows/main.cpp
+@@ -38,11 +38,19 @@ int main(int argc, char *argv[])
+ 
+         mainWindow w;
+         app.w=&w;
++
++        Qt::WindowFlags flags = w.windowFlags();
++        flags &= ~Qt::FramelessWindowHint;
++        w.setWindowFlags(flags);
++
+ #ifdef DEVICE_EVB
+         w.showFullScreen();
+ #else
+         w.showFullScreen();
+ #endif
++
++        w.resize(QApplication::desktop()->size());
++
+         return app.exec();
+     }
+     return 0;
+-- 
+1.9.1
+

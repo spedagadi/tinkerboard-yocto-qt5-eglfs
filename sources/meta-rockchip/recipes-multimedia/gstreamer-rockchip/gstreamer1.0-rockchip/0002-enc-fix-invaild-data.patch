@@ -1,0 +1,45 @@
+From 9dfa9ec6ec15d452d5548010f451be8156aee302 Mon Sep 17 00:00:00 2001
+From: Jacob Chen <jacob-chen@iotwrt.com>
+Date: Wed, 13 Sep 2017 12:12:07 +0800
+Subject: [PATCH 2/2] enc: fix invaild data
+
+Signed-off-by: Jacob Chen <jacob-chen@iotwrt.com>
+---
+ gst/rockchipmpp/gstmppvideoenc.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/gst/rockchipmpp/gstmppvideoenc.c b/gst/rockchipmpp/gstmppvideoenc.c
+index 675f37d..bc5fa3c 100644
+--- a/gst/rockchipmpp/gstmppvideoenc.c
++++ b/gst/rockchipmpp/gstmppvideoenc.c
+@@ -366,13 +366,17 @@ gst_mpp_video_enc_process_buffer (GstMppVideoEnc * self, GstBuffer * buffer)
+       if (packet) {
+         gconstpointer *ptr = mpp_packet_get_pos (packet);
+         gsize len = mpp_packet_get_length (packet);
++        gsize sps_len = 0;
+ 
+         if (mpp_packet_get_eos (packet))
+           ret = GST_FLOW_EOS;
+ 
++        if (!sps_flag)
++          sps_len = mpp_packet_get_length (sps_packet);
++
+         GST_LOG_OBJECT (self, "Allocate output buffer");
+         new_buffer = gst_video_encoder_allocate_output_buffer (encoder,
+-            MAX_CODEC_FRAME + len);
++            sps_len + len);
+         if (NULL == new_buffer) {
+           ret = GST_FLOW_FLUSHING;
+           goto beach;
+@@ -383,7 +387,7 @@ gst_mpp_video_enc_process_buffer (GstMppVideoEnc * self, GstBuffer * buffer)
+           gst_buffer_fill (new_buffer, 0, ptr, len);
+         } else {
+           const gpointer *sps_ptr = mpp_packet_get_pos (sps_packet);
+-          gsize sps_len = mpp_packet_get_length (sps_packet);
++          sps_len = mpp_packet_get_length (sps_packet);
+           gst_buffer_fill (new_buffer, 0, sps_ptr, sps_len);
+           gst_buffer_fill (new_buffer, sps_len, ptr, len);
+           sps_flag = 1;
+-- 
+2.7.4
+

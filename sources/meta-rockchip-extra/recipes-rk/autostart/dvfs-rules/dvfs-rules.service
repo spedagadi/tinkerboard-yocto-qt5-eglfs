@@ -1,0 +1,10 @@
+[Unit]
+Description=Rules to deal with dvfs
+
+[Service]
+Type=oneshot
+ExecStart=-/etc/init.d/dvfs-rules.sh start
+ExecStop=-/etc/init.d/dvfs-rules.sh stop
+
+[Install]
+WantedBy=basic.target

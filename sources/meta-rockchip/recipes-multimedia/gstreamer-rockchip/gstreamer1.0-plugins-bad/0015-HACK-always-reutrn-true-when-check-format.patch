@@ -1,0 +1,29 @@
+From ac283c5bd2905a370fe32ea3738aa71a8a0fcac9 Mon Sep 17 00:00:00 2001
+From: Jacob Chen <jacob-chen@iotwrt.com>
+Date: Tue, 9 May 2017 12:10:43 +0800
+Subject: [PATCH] HACK: always reutrn true when check format
+
+The compositor does not yet advertise anything, so hack it
+
+Signed-off-by: Jacob Chen <jacob-chen@iotwrt.com>
+---
+ ext/wayland/wldisplay.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/ext/wayland/wldisplay.c b/ext/wayland/wldisplay.c
+index 39782bc..4c39dfb 100644
+--- a/ext/wayland/wldisplay.c
++++ b/ext/wayland/wldisplay.c
+@@ -198,6 +198,9 @@ gst_wl_display_check_format_for_dmabuf (GstWlDisplay * display,
+   if (!display->dmabuf)
+     return FALSE;
+ 
++  /* XXX: fake, because the compositor does not yet advertise anything */
++  return TRUE;
++
+   dmabuf_fmt = gst_video_format_to_wl_dmabuf_format (format);
+   if (dmabuf_fmt == (guint) - 1)
+     return FALSE;
+-- 
+2.7.4
+

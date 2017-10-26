@@ -1,0 +1,1210 @@
+From c0ce45c28cde9fe2313ded317211c8882cf85613 Mon Sep 17 00:00:00 2001
+From: Lionel CHAZALLON <LongChair@hotmail.com>
+Date: Tue, 17 Oct 2017 21:55:11 -0700
+Subject: [PATCH] Add DRM_PRIME Format Handling and Display for RockChip MPP
+ decoders
+
+This commit allows to use the AV_PIX_FMT_DRM_PRIME newly introduced format in ffmpeg that allows decoders to provide an AVDRMFrameDescriptor struct.
+
+That struct holds dmabuf fds and information allowing zerocopy rendering using KMS / DRM Atomic.
+
+This has been tested on RockChip ROCK64 device.
+---
+ DOCS/man/vo.rst                       |   5 +
+ libmpv/opengl_cb.h                    |  22 ++-
+ options/options.c                     |   2 +
+ options/options.h                     |   1 +
+ video/decode/vd_lavc.c                |   7 +
+ video/fmt-conversion.c                |   3 +
+ video/hwdec.h                         |   1 +
+ video/img_format.h                    |   1 +
+ video/out/drm_atomic.c                | 229 ++++++++++++++++++++++++++++++
+ video/out/drm_atomic.h                |  55 ++++++++
+ video/out/drm_common.c                |  24 +++-
+ video/out/drm_common.h                |   4 +-
+ video/out/drm_prime.c                 |  87 ++++++++++++
+ video/out/drm_prime.h                 |  33 +++++
+ video/out/gpu/hwdec.c                 |   7 +
+ video/out/opengl/context.c            |   3 +
+ video/out/opengl/context.h            |   4 +
+ video/out/opengl/context_drm_egl.c    |  62 ++++++---
+ video/out/opengl/hwdec_drmprime_drm.c | 255 ++++++++++++++++++++++++++++++++++
+ video/out/vo_drm.c                    |   2 +-
+ wscript                               |   5 +
+ wscript_build.py                      |   3 +
+ 22 files changed, 792 insertions(+), 23 deletions(-)
+ create mode 100644 video/out/drm_atomic.c
+ create mode 100644 video/out/drm_atomic.h
+ create mode 100644 video/out/drm_prime.c
+ create mode 100644 video/out/drm_prime.h
+ create mode 100644 video/out/opengl/hwdec_drmprime_drm.c
+
+diff --git a/DOCS/man/vo.rst b/DOCS/man/vo.rst
+index 5d22ab15e7..f4ebb64629 100644
+--- a/DOCS/man/vo.rst
++++ b/DOCS/man/vo.rst
+@@ -504,6 +504,11 @@ Available video output drivers are:
+         Mode ID to use (resolution, bit depth and frame rate).
+         (default: 0)
+ 
++    ``--drm-overlay=<number>``
++        Select the DRM overlay index to use.
++        Overlay index is zero based, and related to crtc.
++        (default: 0)
++
+ ``mediacodec_embed`` (Android)
+     Renders ``IMGFMT_MEDIACODEC`` frames directly to an ``android.view.Surface``.
+     Requires ``--hwdec=mediacodec`` for hardware decoding, along with
+diff --git a/libmpv/opengl_cb.h b/libmpv/opengl_cb.h
+index 799e353a41..45f043c277 100644
+--- a/libmpv/opengl_cb.h
++++ b/libmpv/opengl_cb.h
+@@ -151,6 +151,18 @@ extern "C" {
+  * up until mpv_opengl_cb_uninit_gl() is called. If the name is not anything
+  * you know/expected, return NULL from the function.
+  *
++ * * Windowing system scaling
++ * ------------------------------------
++ *
++ * When using GL, sometimes GL rendering window is upscaled to display buffer
++ * Typically with drm where GL framebuffer can be upscaled at later stage
++ * In That case glMPGetNativeDisplay("opengl-cb") should return the GL window
++ * dimensions, that is 4 elements :
++ * 0 : left coordinates of window (usually 0)
++ * 1 : top coordinates of window (usually 0)
++ * 2 : width of GL window
++ * 3 : height of GL window
++ *
+  * Windowing system interop on Intel/Linux with VAAPI
+  * --------------------------------------------------
+  *
+@@ -163,9 +175,13 @@ extern "C" {
+  *
+  * glMPGetNativeDisplay("wl") should return a Wayland "struct wl_display *".
+  *
+- * glMPGetNativeDisplay("drm") should return a DRM FD casted to intptr_t (note
+- * that a 0 FD is not supported - if this can happen in your case, you must
+- * dup2() it to a non-0 FD).
++ * glMPGetNativeDisplay("drm") should return an array of void * containing
++ * 3 elements which are
++ * 0 : pointer to the DRM fd (int). Note that a 0 FD is not supported - if this
++ *     can happen in your case, you must dup2() it to a non-0 FD).
++ * 1 : pointer to the crtc_id (int). This is the currently used crtc.
++ * 2 : pointer to the drmAtomicRequest that is being used for the renderloop.
++ *     This atomic request pointer should be usually created at every renderloop.
+  *
+  * nVidia/Linux via VDPAU requires GLX, which does not have this problem (the
+  * GLX API can return the current X11 Display).
+diff --git a/options/options.c b/options/options.c
+index 2f26402526..a79a57f449 100644
+--- a/options/options.c
++++ b/options/options.c
+@@ -111,6 +111,7 @@ const struct m_opt_choice_alternatives mp_hwdec_names[] = {
+     {"d3d11va-copy",HWDEC_D3D11VA_COPY},
+     {"rpi",         HWDEC_RPI},
+     {"rpi-copy",    HWDEC_RPI_COPY},
++    {"rkmpp",       HWDEC_RKMPP},
+     {"mediacodec",  HWDEC_MEDIACODEC},
+     {"mediacodec-copy",HWDEC_MEDIACODEC_COPY},
+     {"cuda",        HWDEC_CUDA},
+@@ -181,6 +182,7 @@ static const m_option_t mp_vo_opt_list[] = {
+     OPT_STRING_VALIDATE("drm-connector", drm_connector_spec,
+                         0, drm_validate_connector_opt),
+     OPT_INT("drm-mode", drm_mode_id, 0),
++    OPT_INT("drm-overlay", drm_overlay_id, 0),
+ #endif
+     OPT_STRING_VALIDATE("opengl-hwdec-interop", gl_hwdec_interop, 0,
+                         ra_hwdec_validate_opt),
+diff --git a/options/options.h b/options/options.h
+index e56ed7d619..008111ade3 100644
+--- a/options/options.h
++++ b/options/options.h
+@@ -57,6 +57,7 @@ typedef struct mp_vo_opts {
+     // vo_drm
+     char *drm_connector_spec;
+     int drm_mode_id;
++    int drm_overlay_id;
+ } mp_vo_opts;
+ 
+ struct mp_cache_opts {
+diff --git a/video/decode/vd_lavc.c b/video/decode/vd_lavc.c
+index 513eded9a4..bf610e83e4 100644
+--- a/video/decode/vd_lavc.c
++++ b/video/decode/vd_lavc.c
+@@ -151,6 +151,12 @@ static const struct vd_lavc_hwdec mp_vd_lavc_rpi_copy = {
+ };
+ #endif
+ 
++static const struct vd_lavc_hwdec mp_vd_lavc_rkmpp = {
++    .type = HWDEC_RKMPP,
++    .lavc_suffix = "_rkmpp",
++    .image_format = IMGFMT_DRMPRIME,
++};
++
+ #if HAVE_CUDA_HWACCEL
+ static const struct vd_lavc_hwdec mp_vd_lavc_cuda = {
+     .type = HWDEC_CUDA,
+@@ -270,6 +276,7 @@ static const struct vd_lavc_hwdec *const hwdec_list[] = {
+     &mp_vd_lavc_cuda_copy,
+ #endif
+     &mp_vd_lavc_crystalhd,
++    &mp_vd_lavc_rkmpp,
+     NULL
+ };
+ 
+diff --git a/video/fmt-conversion.c b/video/fmt-conversion.c
+index 0bdbd109bb..e89ea6cd59 100644
+--- a/video/fmt-conversion.c
++++ b/video/fmt-conversion.c
+@@ -75,6 +75,9 @@ static const struct {
+     {IMGFMT_CUDA, AV_PIX_FMT_CUDA},
+ #endif
+     {IMGFMT_P010, AV_PIX_FMT_P010},
++#if HAVE_DRMPRIME
++    {IMGFMT_DRMPRIME, AV_PIX_FMT_DRM_PRIME},
++#endif
+ 
+     {0, AV_PIX_FMT_NONE}
+ };
+diff --git a/video/hwdec.h b/video/hwdec.h
+index a432ecce2c..81ba4794b2 100644
+--- a/video/hwdec.h
++++ b/video/hwdec.h
+@@ -27,6 +27,7 @@ enum hwdec_type {
+     HWDEC_CUDA,
+     HWDEC_CUDA_COPY,
+     HWDEC_CRYSTALHD,
++    HWDEC_RKMPP,
+ };
+ 
+ #define HWDEC_IS_AUTO(x) ((x) == HWDEC_AUTO || (x) == HWDEC_AUTO_COPY)
+diff --git a/video/img_format.h b/video/img_format.h
+index 01d101aa8e..123c8ba55e 100644
+--- a/video/img_format.h
++++ b/video/img_format.h
+@@ -204,6 +204,7 @@ enum mp_imgfmt {
+     IMGFMT_MMAL,            // MMAL_BUFFER_HEADER_T
+     IMGFMT_VIDEOTOOLBOX,    // CVPixelBufferRef
+     IMGFMT_MEDIACODEC,      // AVMediaCodecBuffer
++    IMGFMT_DRMPRIME,        // AVDRMFrameDescriptor
+ 
+     IMGFMT_CUDA,            // CUDA Buffer
+     // Generic pass-through of AV_PIX_FMT_*. Used for formats which don't have
+diff --git a/video/out/drm_atomic.c b/video/out/drm_atomic.c
+new file mode 100644
+index 0000000000..b3ba591a7e
+--- /dev/null
++++ b/video/out/drm_atomic.c
+@@ -0,0 +1,229 @@
++/*
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * mpv is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <errno.h>
++#include <inttypes.h>
++
++#include "common/common.h"
++#include "common/msg.h"
++#include "drm_atomic.h"
++
++int drm_object_create_properties(struct mp_log *log, int fd, struct drm_object *object)
++{
++    object->props = drmModeObjectGetProperties(fd, object->id, object->type);
++    if (object->props) {
++        object->props_info = malloc(object->props->count_props * sizeof(object->props_info));
++        if (object->props_info) {
++            for (int i=0; i < object->props->count_props; i++)
++                object->props_info[i] = drmModeGetProperty(fd, object->props->props[i]);
++        } else {
++            mp_err(log, "Out of memory\n");
++            goto fail;
++        }
++    } else {
++        mp_err(log, "Failed to retrieve properties for object id %d\n", object->id);
++        goto fail;
++    }
++
++    return 0;
++
++  fail:
++    drm_object_free_properties(object);
++    return -1;
++}
++
++void drm_object_free_properties(struct drm_object *object)
++{
++    if (object->props) {
++        for (int i=0; i < object->props->count_props; i++) {
++            if (object->props_info[i]) {
++                drmModeFreeProperty(object->props_info[i]);
++                object->props_info[i] = NULL;
++            }
++        }
++
++        free(object->props_info);
++        object->props_info = NULL;
++
++        drmModeFreeObjectProperties(object->props);
++        object->props = NULL;
++    }
++}
++
++int drm_object_get_property(struct drm_object *object, char *name, uint64_t *value)
++{
++   for (int i=0; i < object->props->count_props; i++) {
++       if (strcasecmp(name, object->props_info[i]->name) == 0) {
++           *value = object->props->prop_values[i];
++           return 0;
++       }
++   }
++
++   return -EINVAL;
++}
++
++int drm_object_set_property(drmModeAtomicReq *request, struct drm_object *object, char *name, uint64_t value)
++{
++   for (int i=0; i < object->props->count_props; i++) {
++       if (strcasecmp(name, object->props_info[i]->name) == 0) {
++           return drmModeAtomicAddProperty(request, object->id,
++                                           object->props_info[i]->prop_id, value);
++       }
++   }
++
++   return -EINVAL;
++}
++
++struct drm_object * drm_object_create(struct mp_log *log, int fd, uint32_t object_id, uint32_t type)
++{
++    struct drm_object *obj = NULL;
++    obj = malloc(sizeof(struct drm_object));
++    if (obj) {
++        obj->id = object_id;
++        obj->type = type;
++
++        if (drm_object_create_properties(log, fd, obj)) {
++            free(obj);
++            return NULL;
++        }
++    }
++
++    return obj;
++}
++
++void drm_object_free(struct drm_object *object)
++{
++    if (object) {
++        drm_object_free_properties(object);
++        free(object);
++    }
++}
++
++void drm_object_print_info(struct mp_log *log, struct drm_object *object)
++{
++    mp_err(log, "Object ID = %d (type = %x) has %d properties\n",
++           object->id, object->type, object->props->count_props);
++
++    for (int i=0; i < object->props->count_props; i++)
++        mp_err(log, "\tProperty \"%s\" = %" PRId64 "\n",
++               object->props_info[i]->name, object->props->prop_values[i]);
++}
++
++struct drm_atomic_context *drm_atomic_create_context(struct mp_log *log, int fd, int crtc_id, int overlay_id)
++{
++    drmModePlane *drmplane = NULL;
++    drmModePlaneRes *plane_res = NULL;
++    drmModeRes *res = NULL;
++    struct drm_object *plane = NULL;
++    struct drm_atomic_context *ctx;
++    int crtc_index = -1;
++    int layercount = 0;
++    uint64_t value;
++
++    res = drmModeGetResources(fd);
++    if (!res) {
++        mp_err(log, "Cannot retrieve DRM resources: %s\n", mp_strerror(errno));
++        goto fail;
++    }
++
++    plane_res = drmModeGetPlaneResources(fd);
++    if (!plane_res) {
++        mp_err(log, "Cannot retrieve plane ressources: %s\n", mp_strerror(errno));
++        goto fail;
++    }
++
++    ctx = malloc(sizeof(*ctx));
++    if (!ctx) {
++        mp_err(log, "Out of memory\n");
++        goto fail;
++    }
++
++    memset(ctx, 0, sizeof(*ctx));
++
++    ctx->fd = fd;
++    ctx->crtc = drm_object_create(log, ctx->fd, crtc_id, DRM_MODE_OBJECT_CRTC);
++    if (!ctx->crtc) {
++        mp_err(log, "Failed to create CRTC object\n");
++        goto fail;
++    }
++
++    for (int i=0; i<res->count_crtcs; i++) {
++        if (res->crtcs[i] == crtc_id) {
++            crtc_index = i;
++            break;
++        }
++    }
++
++    for (unsigned int j=0; j < plane_res->count_planes; j++) {
++
++        drmplane = drmModeGetPlane (ctx->fd, plane_res->planes[j]);
++        if (drmplane->possible_crtcs & (1 << crtc_index)) {
++
++            plane = drm_object_create(log, ctx->fd, drmplane->plane_id, DRM_MODE_OBJECT_PLANE);
++            if (plane) {
++                if (drm_object_get_property(plane, "TYPE", &value) == -EINVAL) {
++                    mp_err(log, "Unable to retrieve type property from plane %d\n", j);
++                    goto fail;
++                } else {
++
++                    if ((value == DRM_PLANE_TYPE_OVERLAY) && (layercount == overlay_id))
++                        ctx->overlay_plane = plane;
++                    else if (value == DRM_PLANE_TYPE_PRIMARY)
++                        ctx->primary_plane = plane;
++                    else {
++                        drm_object_free(plane);
++                        plane = NULL;
++                    }
++
++                    if (value == DRM_PLANE_TYPE_OVERLAY)
++                        layercount++;
++                }
++            } else {
++                mp_err(log, "Failed to create Plane object from plane ID %d\n", drmplane->plane_id);
++                goto fail;
++            }
++        }
++        drmModeFreePlane(drmplane);
++    }
++
++    mp_verbose(log, "Found Primary plane with ID %d, overlay with ID %d\n",
++               ctx->primary_plane->id, ctx->overlay_plane->id);
++
++    drmModeFreePlaneResources(plane_res);
++    drmModeFreeResources(res);
++    return ctx;
++
++
++fail:
++    if (res)
++        drmModeFreeResources(res);
++    if (plane_res)
++        drmModeFreePlaneResources(plane_res);
++    if (drmplane)
++        drmModeFreePlane(drmplane);
++    if (plane)
++        drm_object_free(plane);
++    return false;
++}
++
++void drm_atomic_destroy_context(struct drm_atomic_context *ctx)
++{
++    drm_object_free(ctx->crtc);
++    drm_object_free(ctx->primary_plane);
++    drm_object_free(ctx->overlay_plane);
++    free(ctx);
++}
+diff --git a/video/out/drm_atomic.h b/video/out/drm_atomic.h
+new file mode 100644
+index 0000000000..ac09886abd
+--- /dev/null
++++ b/video/out/drm_atomic.h
+@@ -0,0 +1,55 @@
++/*
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * mpv is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef DRMATOMIC_H
++#define DRMATOMIC_H
++
++#include <stdlib.h>
++#include <xf86drm.h>
++#include <xf86drmMode.h>
++
++#include "common/msg.h"
++
++struct drm_object {
++    uint32_t id;
++    uint32_t type;
++    drmModeObjectProperties *props;
++    drmModePropertyRes **props_info;
++};
++
++struct drm_atomic_context {
++    int fd;
++
++    struct drm_object *crtc;
++    struct drm_object *primary_plane;
++    struct drm_object *overlay_plane;
++
++    drmModeAtomicReq *request;
++};
++
++
++int drm_object_create_properties(struct mp_log *log, int fd, struct drm_object *object);
++void drm_object_free_properties(struct drm_object *object);
++int drm_object_get_property(struct drm_object *object, char *name, uint64_t *value);
++int drm_object_set_property(drmModeAtomicReq *request, struct drm_object *object, char *name, uint64_t value);
++struct drm_object * drm_object_create(struct mp_log *log, int fd, uint32_t object_id, uint32_t type);
++void drm_object_free(struct drm_object *object);
++void drm_object_print_info(struct mp_log *log, struct drm_object *object);
++struct drm_atomic_context *drm_atomic_create_context(struct mp_log *log, int fd, int crtc_id, int overlay_id);
++void drm_atomic_destroy_context(struct drm_atomic_context *ctx);
++
++#endif // DRMATOMIC_H
+diff --git a/video/out/drm_common.c b/video/out/drm_common.c
+index aea4afaa09..b0867c5fcf 100644
+--- a/video/out/drm_common.c
++++ b/video/out/drm_common.c
+@@ -222,7 +222,7 @@ static void parse_connector_spec(struct mp_log *log,
+ 
+ 
+ struct kms *kms_create(struct mp_log *log, const char *connector_spec,
+-                       int mode_id)
++                       int mode_id, int overlay_id)
+ {
+     int card_no = -1;
+     char *connector_name = NULL;
+@@ -260,6 +260,24 @@ struct kms *kms_create(struct mp_log *log, const char *connector_spec,
+     if (!setup_mode(kms, mode_id))
+         goto err;
+ 
++    // Universal planes allows accessing all the planes (including primary)
++    if (drmSetClientCap(kms->fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1)) {
++        mp_err(log, "Failed to set Universal planes capability\n");
++    }
++
++    if (drmSetClientCap(kms->fd, DRM_CLIENT_CAP_ATOMIC, 1)) {
++        mp_verbose(log, "No DRM Atomic support found\n");
++    }
++    else {
++        mp_verbose(log, "DRM Atomic support found\n");
++        kms->atomic_context = drm_atomic_create_context(kms->log, kms->fd, kms->crtc_id, overlay_id);
++        if (!kms->atomic_context) {
++            mp_err(log, "Failed to create DRM atomic context\n");
++            goto err;
++        }
++    }
++
++
+     drmModeFreeResources(res);
+     return kms;
+ 
+@@ -284,6 +302,10 @@ void kms_destroy(struct kms *kms)
+         drmModeFreeEncoder(kms->encoder);
+         kms->encoder = NULL;
+     }
++    if (kms->atomic_context) {
++       drm_atomic_destroy_context(kms->atomic_context);
++    }
++
+     close(kms->fd);
+     talloc_free(kms);
+ }
+diff --git a/video/out/drm_common.h b/video/out/drm_common.h
+index 6796472cfc..0e6e76d03e 100644
+--- a/video/out/drm_common.h
++++ b/video/out/drm_common.h
+@@ -22,6 +22,7 @@
+ #include <xf86drm.h>
+ #include <xf86drmMode.h>
+ #include "options/m_option.h"
++#include "drm_atomic.h"
+ 
+ struct kms {
+     struct mp_log *log;
+@@ -31,6 +32,7 @@ struct kms {
+     drmModeModeInfo mode;
+     uint32_t crtc_id;
+     int card_no;
++    struct drm_atomic_context *atomic_context;
+ };
+ 
+ struct vt_switcher {
+@@ -51,7 +53,7 @@ void vt_switcher_release(struct vt_switcher *s, void (*handler)(void*),
+                          void *user_data);
+ 
+ struct kms *kms_create(struct mp_log *log, const char *connector_spec,
+-                       int mode_id);
++                       int mode_id, int overlay_id);
+ void kms_destroy(struct kms *kms);
+ double kms_get_display_fps(const struct kms *kms);
+ 
+diff --git a/video/out/drm_prime.c b/video/out/drm_prime.c
+new file mode 100644
+index 0000000000..e85243fcd8
+--- /dev/null
++++ b/video/out/drm_prime.c
+@@ -0,0 +1,87 @@
++/*
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * mpv is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <unistd.h>
++#include <xf86drm.h>
++#include <xf86drmMode.h>
++
++#include "common/msg.h"
++#include "drm_common.h"
++#include "drm_prime.h"
++
++int drm_prime_create_framebuffer(struct mp_log *log, int fd, AVDRMFrameDescriptor *descriptor, int width, int height,
++                                  struct  drm_prime_framebuffer *framebuffer)
++{
++    AVDRMLayerDescriptor *layer = NULL;
++    uint32_t pitches[4], offsets[4], handles[4];
++    int ret, layer_fd;
++
++    if ((descriptor) && (descriptor->nb_layers)) {
++
++        memset(framebuffer, 0, sizeof(*framebuffer));
++
++        for (int object=0; object < descriptor->nb_objects; object++) {
++            ret = drmPrimeFDToHandle(fd, descriptor->objects[object].fd, &framebuffer->gem_handles[object]);
++            if (ret < 0) {
++                mp_err(log, "Failed to retrieve the Prime Handle from handle %d (%d).\n", object, descriptor->objects[object].fd);
++                goto fail;
++            }
++        }
++
++        layer = &descriptor->layers[0];
++
++        for (int plane = 0; plane < AV_DRM_MAX_PLANES; plane++) {
++            layer_fd = framebuffer->gem_handles[layer->planes[plane].object_index];
++            if (layer_fd && layer->planes[plane].pitch) {
++                pitches[plane] = layer->planes[plane].pitch;
++                offsets[plane] = layer->planes[plane].offset;
++                handles[plane] = layer_fd;
++            }
++            else {
++                pitches[plane] = 0;
++                offsets[plane] = 0;
++                handles[plane] = 0;
++            }
++        }
++
++        ret = drmModeAddFB2(fd, width, height, layer->format,
++                            handles, pitches, offsets, &framebuffer->fb_id, 0);
++        if (ret < 0) {
++            mp_err(log, "Failed to create framebuffer on layer %d.\n", 0);
++            goto fail;
++        }
++    }
++
++   return 0;
++
++fail:
++   memset(framebuffer, 0, sizeof(*framebuffer));
++   return -1;
++}
++
++void drm_prime_destroy_framebuffer(struct mp_log *log, int fd, struct  drm_prime_framebuffer *framebuffer)
++{
++    if (framebuffer->fb_id)
++        drmModeRmFB(fd, framebuffer->fb_id);
++
++    for (int i=0; i < AV_DRM_MAX_PLANES; i++) {
++        if (framebuffer->gem_handles[i])
++            drmIoctl(fd, DRM_IOCTL_GEM_CLOSE, &framebuffer->gem_handles[i]);
++    }
++
++    memset(framebuffer, 0, sizeof(*framebuffer));
++}
+diff --git a/video/out/drm_prime.h b/video/out/drm_prime.h
+new file mode 100644
+index 0000000000..0653fdbebf
+--- /dev/null
++++ b/video/out/drm_prime.h
+@@ -0,0 +1,33 @@
++/*
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * mpv is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef DRM_PRIME_H
++#define DRM_PRIME_H
++
++#include <libavutil/hwcontext_drm.h>
++
++#include "common/msg.h"
++
++struct drm_prime_framebuffer {
++    uint32_t fb_id;
++    uint32_t gem_handles[AV_DRM_MAX_PLANES];
++};
++
++int drm_prime_create_framebuffer(struct mp_log *log, int fd, AVDRMFrameDescriptor *descriptor, int width, int height,
++                                  struct  drm_prime_framebuffer *framebuffers);
++void drm_prime_destroy_framebuffer(struct mp_log *log, int fd, struct  drm_prime_framebuffer *framebuffers);
++#endif // DRM_PRIME_H
+diff --git a/video/out/gpu/hwdec.c b/video/out/gpu/hwdec.c
+index 5fbc1aa4a9..9eefe3e287 100644
+--- a/video/out/gpu/hwdec.c
++++ b/video/out/gpu/hwdec.c
+@@ -36,6 +36,9 @@ extern const struct ra_hwdec_driver ra_hwdec_dxva2gldx;
+ extern const struct ra_hwdec_driver ra_hwdec_dxva2;
+ extern const struct ra_hwdec_driver ra_hwdec_cuda;
+ extern const struct ra_hwdec_driver ra_hwdec_rpi_overlay;
++#if HAVE_DRMPRIME && HAVE_DRM
++extern const struct ra_hwdec_driver ra_hwdec_drmprime_drm;
++#endif
+ 
+ static const struct ra_hwdec_driver *const mpgl_hwdec_drivers[] = {
+ #if HAVE_VAAPI_EGL
+@@ -66,6 +69,10 @@ static const struct ra_hwdec_driver *const mpgl_hwdec_drivers[] = {
+ #if HAVE_RPI
+     &ra_hwdec_rpi_overlay,
+ #endif
++#if HAVE_DRMPRIME && HAVE_DRM
++    &ra_hwdec_drmprime_drm,
++#endif
++
+     NULL
+ };
+ 
+diff --git a/video/out/opengl/context.c b/video/out/opengl/context.c
+index cdaf6320cd..46c17f815f 100644
+--- a/video/out/opengl/context.c
++++ b/video/out/opengl/context.c
+@@ -270,6 +270,9 @@ bool ra_gl_ctx_start_frame(struct ra_swapchain *sw, struct ra_fbo *out_fbo)
+     struct priv *p = sw->priv;
+     out_fbo->tex = p->wrapped_fb;
+     out_fbo->flip = !p->params.flipped; // OpenGL FBs are normally flipped
++
++    if (p->params.start_frame)
++        p->params.start_frame(sw->ctx);
+     return true;
+ }
+ 
+diff --git a/video/out/opengl/context.h b/video/out/opengl/context.h
+index 95ed374555..cdd76fe722 100644
+--- a/video/out/opengl/context.h
++++ b/video/out/opengl/context.h
+@@ -17,6 +17,10 @@ bool ra_gl_ctx_test_version(struct ra_ctx *ctx, int version, bool es);
+ // clean them up)
+ 
+ struct ra_gl_ctx_params {
++    // This is called at every frame beginning when defined
++    // it can be optionally implemented.
++    void (*start_frame)(struct ra_ctx *ctx);
++
+     // Set to the platform-specific function to swap buffers, like
+     // glXSwapBuffers, eglSwapBuffers etc. This will be called by
+     // ra_gl_ctx_swap_buffers. Required unless you either never call that
+diff --git a/video/out/opengl/context_drm_egl.c b/video/out/opengl/context_drm_egl.c
+index 31e603d38c..f52b9ec656 100644
+--- a/video/out/opengl/context_drm_egl.c
++++ b/video/out/opengl/context_drm_egl.c
+@@ -75,6 +75,8 @@ struct priv {
+ 
+     bool vt_switcher_active;
+     struct vt_switcher vt_switcher;
++
++    void *native_handles[3];
+ };
+ 
+ static bool init_egl(struct ra_ctx *ctx)
+@@ -119,7 +121,7 @@ static bool init_gbm(struct ra_ctx *ctx)
+         p->gbm.device,
+         p->kms->mode.hdisplay,
+         p->kms->mode.vdisplay,
+-        GBM_BO_FORMAT_XRGB8888,
++        GBM_FORMAT_XRGB8888,
+         GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+     if (!p->gbm.surface) {
+         MP_ERR(ctx->vo, "Failed to create GBM surface.\n");
+@@ -153,7 +155,7 @@ static void update_framebuffer_from_bo(struct ra_ctx *ctx, struct gbm_bo *bo)
+     uint32_t handle = gbm_bo_get_handle(bo).u32;
+ 
+     int ret = drmModeAddFB(fb->fd, fb->width, fb->height,
+-                           24, 32, stride, handle, &fb->id);
++                           32, 32, stride, handle, &fb->id);
+     if (ret) {
+         MP_ERR(ctx->vo, "Failed to create framebuffer: %s\n", mp_strerror(errno));
+     }
+@@ -161,13 +163,6 @@ static void update_framebuffer_from_bo(struct ra_ctx *ctx, struct gbm_bo *bo)
+     p->fb = fb;
+ }
+ 
+-static void page_flipped(int fd, unsigned int frame, unsigned int sec,
+-                         unsigned int usec, void *data)
+-{
+-    struct priv *p = data;
+-    p->waiting_for_flip = false;
+-}
+-
+ static bool crtc_setup(struct ra_ctx *ctx)
+ {
+     struct priv *p = ctx->priv;
+@@ -241,17 +236,40 @@ static void acquire_vt(void *data)
+     crtc_setup(ctx);
+ }
+ 
++static void drm_egl_start_frame(struct ra_ctx *ctx)
++{
++    struct priv *p = ctx->priv;
++    if (p->kms->atomic_context) {
++        p->kms->atomic_context->request = drmModeAtomicAlloc();
++        p->native_handles[2] = p->kms->atomic_context->request;
++    }
++}
++
+ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
+ {
+     struct priv *p = ctx->priv;
++    struct drm_atomic_context *atomic_ctx = p->kms->atomic_context;
++    int ret;
+     eglSwapBuffers(p->egl.display, p->egl.surface);
+     p->gbm.next_bo = gbm_surface_lock_front_buffer(p->gbm.surface);
+     p->waiting_for_flip = true;
+     update_framebuffer_from_bo(ctx, p->gbm.next_bo);
+-    int ret = drmModePageFlip(p->kms->fd, p->kms->crtc_id, p->fb->id,
+-                              DRM_MODE_PAGE_FLIP_EVENT, p);
+-    if (ret) {
+-        MP_WARN(ctx->vo, "Failed to queue page flip: %s\n", mp_strerror(errno));
++
++    if (atomic_ctx) {
++        drm_object_set_property(atomic_ctx->request, atomic_ctx->primary_plane, "FB_ID", p->fb->id);
++        drm_object_set_property(atomic_ctx->request, atomic_ctx->primary_plane, "CRTC_ID", atomic_ctx->crtc->id);
++        drm_object_set_property(atomic_ctx->request, atomic_ctx->primary_plane, "ZPOS", 1);
++
++        ret = drmModeAtomicCommit(p->kms->fd, atomic_ctx->request,
++                                  DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, NULL);
++        if (ret)
++            MP_WARN(ctx->vo, "Failed to commit atomic request (%d)\n", ret);
++    } else {
++        ret = drmModePageFlip(p->kms->fd, p->kms->crtc_id, p->fb->id,
++                                  DRM_MODE_PAGE_FLIP_EVENT, p);
++        if (ret) {
++            MP_WARN(ctx->vo, "Failed to queue page flip: %s\n", mp_strerror(errno));
++        }
+     }
+ 
+     // poll page flip finish event
+@@ -262,9 +280,16 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
+         ret = drmHandleEvent(p->kms->fd, &p->ev);
+         if (ret != 0) {
+             MP_ERR(ctx->vo, "drmHandleEvent failed: %i\n", ret);
++            p->waiting_for_flip = false;
+             return;
+         }
+     }
++    p->waiting_for_flip = false;
++
++    if (atomic_ctx) {
++        drmModeAtomicFree(atomic_ctx->request);
++        p->native_handles[1] = atomic_ctx->request = NULL;
++    }
+ 
+     gbm_surface_release_buffer(p->gbm.surface, p->gbm.bo);
+     p->gbm.bo = p->gbm.next_bo;
+@@ -304,7 +329,6 @@ static bool drm_egl_init(struct ra_ctx *ctx)
+ 
+     struct priv *p = ctx->priv = talloc_zero(ctx, struct priv);
+     p->ev.version = DRM_EVENT_CONTEXT_VERSION;
+-    p->ev.page_flip_handler = page_flipped;
+ 
+     p->vt_switcher_active = vt_switcher_init(&p->vt_switcher, ctx->vo->log);
+     if (p->vt_switcher_active) {
+@@ -314,9 +338,9 @@ static bool drm_egl_init(struct ra_ctx *ctx)
+         MP_WARN(ctx, "Failed to set up VT switcher. Terminal switching will be unavailable.\n");
+     }
+ 
+-    MP_VERBOSE(ctx, "Initializing KMS\n");
++    MP_VERBOSE(ctx->vo, "Initializing KMS\n");
+     p->kms = kms_create(ctx->log, ctx->vo->opts->drm_connector_spec,
+-                        ctx->vo->opts->drm_mode_id);
++                        ctx->vo->opts->drm_mode_id, ctx->vo->opts->drm_overlay_id);
+     if (!p->kms) {
+         MP_ERR(ctx->vo, "Failed to create KMS.\n");
+         return false;
+@@ -360,10 +384,14 @@ static bool drm_egl_init(struct ra_ctx *ctx)
+         return false;
+     }
+ 
++    p->native_handles[0] = &p->kms->fd;
++    p->native_handles[1] = &p->kms->crtc_id;
++    p->native_handles[2] = p->kms->atomic_context->request;
+     struct ra_gl_ctx_params params = {
++        .start_frame = drm_egl_start_frame,
+         .swap_buffers = drm_egl_swap_buffers,
+         .native_display_type = "drm",
+-        .native_display = (void *)(intptr_t)p->kms->fd,
++        .native_display = (void *)p->native_handles,
+     };
+     if (!ra_gl_ctx_init(ctx, &p->gl, params))
+         return false;
+diff --git a/video/out/opengl/hwdec_drmprime_drm.c b/video/out/opengl/hwdec_drmprime_drm.c
+new file mode 100644
+index 0000000000..5ffc32f7db
+--- /dev/null
++++ b/video/out/opengl/hwdec_drmprime_drm.c
+@@ -0,0 +1,255 @@
++/*
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * mpv is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <assert.h>
++#include <errno.h>
++#include <libavutil/hwcontext_drm.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <math.h>
++#include <stdbool.h>
++
++#include "common.h"
++#include "video/hwdec.h"
++#include "common/msg.h"
++#include "options/m_config.h"
++#include "video/out/drm_common.h"
++#include "video/out/drm_prime.h"
++#include "video/out/gpu/hwdec.h"
++#include "video/mp_image.h"
++
++#include "ra_gl.h"
++
++typedef struct drm_frame
++{
++    struct drm_prime_framebuffer fb;
++    struct mp_image *image; // associated mpv image
++
++} drm_frame;
++
++struct priv {
++    struct mp_log *log;
++
++    struct mp_image_params params;
++  
++    struct drm_atomic_context *ctx;
++    struct drm_frame current_frame, old_frame;
++
++    struct mp_rect src, dst;
++};
++
++static void set_current_frame(struct ra_hwdec *hw, drm_frame *frame)
++{
++    struct priv *p = hw->priv;
++
++    // frame will be on screen after next vsync
++    // current_frame is currently the displayed frame and will be replaced
++    // by frame after next vsync.
++    // We used old frame as triple buffering to make sure that the drm framebuffer
++    // is not being displayed when we release it.
++
++    drm_prime_destroy_framebuffer(p->log, p->ctx->fd, &p->old_frame.fb);
++    mp_image_setrefp(&p->old_frame.image, p->current_frame.image);
++    p->old_frame.fb = p->current_frame.fb;
++
++    if (frame) {
++        p->current_frame.fb = frame->fb;
++        mp_image_setrefp(&p->current_frame.image, frame->image);
++    } else {
++        memset(&p->current_frame.fb, 0, sizeof(p->current_frame.fb));
++        mp_image_setrefp(&p->current_frame.image, NULL);
++    }
++}
++
++static void scale_dst_rect(struct ra_hwdec *hw, int source_w, int source_h ,struct mp_rect *src, struct mp_rect *dst)
++{
++    struct priv *p = hw->priv;
++    drmModeCrtcPtr crtc;
++    double hratio, vratio, ratio;
++    int display_w = 0, display_h = 0;
++
++    // drm can allow to have a layer that has a different size from framebuffer
++    // we scale here the destination size to video mode
++    hratio = vratio = ratio = 1.0;
++
++    crtc = drmModeGetCrtc(p->ctx->fd, p->ctx->crtc->id);
++    if (crtc) {
++        display_w = crtc->mode.hdisplay;
++        display_h = crtc->mode.vdisplay;
++        drmModeFreeCrtc(crtc);
++    }
++
++    hratio = (double)display_w / (double)source_w;
++    vratio = (double)display_h / (double)source_h;
++    ratio = hratio <= vratio ? hratio : vratio;
++
++    dst->x0 = src->x0 * ratio;
++    dst->x1 = src->x1 * ratio;
++    dst->y0 = src->y0 * ratio;
++    dst->y1 = src->y1 * ratio;
++
++    int offset_x = (display_w - ratio * source_w) / 2;
++    int offset_y = (display_h - ratio * source_h) / 2;
++
++    dst->x0 += offset_x;
++    dst->x1 += offset_x;
++    dst->y0 += offset_y;
++    dst->y1 += offset_y;
++}
++
++static int overlay_frame(struct ra_hwdec *hw, struct mp_image *hw_image,
++                         struct mp_rect *src, struct mp_rect *dst, bool newframe)
++{
++    struct priv *p = hw->priv;
++    GL *gl = ra_gl_get(hw->ra);
++    AVDRMFrameDescriptor *desc = NULL;
++    drmModeAtomicReq *request = NULL;
++    struct drm_frame next_frame;
++    int ret;
++
++    memset(&next_frame, 0, sizeof(drm_frame));
++
++    if (hw_image) {
++
++        // grab opengl-cb windowing info to eventually upscale the overlay
++        // as egl windows could be upscaled to primary plane.
++        int *data = gl ? mpgl_get_native_display(gl, "opengl-cb") : NULL;
++        if (data)
++            scale_dst_rect(hw, data[2], data[3], dst, &p->dst);
++        else
++            p->dst = *dst;
++        p->src = *src;
++
++        // grab drm interop info
++        void **drm_data;
++        drm_data =  gl ? mpgl_get_native_display(gl, "drm") : NULL;
++        if (drm_data)
++            request = (drmModeAtomicReq *)drm_data[2];
++
++        next_frame.image = hw_image;
++        desc = (AVDRMFrameDescriptor *)hw_image->planes[0];
++
++        if (desc) {
++            int srcw = p->src.x1 - p->src.x0;
++            int srch = p->src.y1 - p->src.y0;
++            int dstw = MP_ALIGN_UP(p->dst.x1 - p->dst.x0, 2);
++            int dsth = MP_ALIGN_UP(p->dst.y1 - p->dst.y0, 2);
++
++            if (drm_prime_create_framebuffer(p->log, p->ctx->fd, desc, srcw, srch, &next_frame.fb)) {
++                ret = -1;
++                goto fail;
++            }
++
++            if (request) {
++                drm_object_set_property(request, p->ctx->overlay_plane, "FB_ID", next_frame.fb.fb_id);
++                drm_object_set_property(request,  p->ctx->overlay_plane, "CRTC_ID", p->ctx->crtc->id);
++                drm_object_set_property(request,  p->ctx->overlay_plane, "SRC_X",   p->src.x0 << 16);
++                drm_object_set_property(request,  p->ctx->overlay_plane, "SRC_Y",   p->src.y0 << 16);
++                drm_object_set_property(request,  p->ctx->overlay_plane, "SRC_W",   srcw << 16);
++                drm_object_set_property(request,  p->ctx->overlay_plane, "SRC_H",   srch << 16);
++                drm_object_set_property(request,  p->ctx->overlay_plane, "CRTC_X",  MP_ALIGN_DOWN(p->dst.x0, 2));
++                drm_object_set_property(request,  p->ctx->overlay_plane, "CRTC_Y",  MP_ALIGN_DOWN(p->dst.y0, 2));
++                drm_object_set_property(request,  p->ctx->overlay_plane, "CRTC_W",  dstw);
++                drm_object_set_property(request,  p->ctx->overlay_plane, "CRTC_H",  dsth);
++                drm_object_set_property(request,  p->ctx->overlay_plane, "ZPOS",    0);
++            } else {
++                ret = drmModeSetPlane(p->ctx->fd, p->ctx->overlay_plane->id, p->ctx->crtc->id, next_frame.fb.fb_id, 0,
++                                      MP_ALIGN_DOWN(p->dst.x0, 2), MP_ALIGN_DOWN(p->dst.y0, 2), dstw, dsth,
++                                      p->src.x0 << 16, p->src.y0 << 16 , srcw << 16, srch << 16);
++                if (ret < 0) {
++                    MP_ERR(hw, "Failed to set the plane %d (buffer %d).\n", p->ctx->overlay_plane->id,
++                                next_frame.fb.fb_id);
++                    goto fail;
++                }
++            }
++        }
++    }
++
++    set_current_frame(hw, &next_frame);
++    return 0;
++    
++ fail:
++    drm_prime_destroy_framebuffer(p->log, p->ctx->fd, &next_frame.fb);
++    return ret;
++}
++
++static void uninit(struct ra_hwdec *hw)
++{
++    struct priv *p = hw->priv;
++
++    set_current_frame(hw, NULL);
++
++    if (p->ctx) {
++        drm_atomic_destroy_context(p->ctx);
++        p->ctx = NULL;
++    }
++}
++
++static int init(struct ra_hwdec *hw)
++{
++    struct priv *p = hw->priv;
++    int drm_overlay;
++    void **drm_data;
++
++    p->log = hw->log;
++
++    mp_read_option_raw(hw->global, "drm-overlay", &m_option_type_int, &drm_overlay);
++
++    GL *gl = ra_gl_get(hw->ra);
++    drm_data =  gl ? mpgl_get_native_display(gl, "drm") : NULL;
++    if (!drm_data) {
++        MP_ERR(hw, "Could not get drm interop info.\n");
++        goto err;
++    }
++
++    int *fd      = (int *)drm_data[0];
++    int *crtc_id = (int *)drm_data[1];
++
++    if (fd) {
++        p->ctx = drm_atomic_create_context(p->log, *fd, *crtc_id, drm_overlay);
++        if (!p->ctx) {
++            mp_err(p->log, "Failed to retrieve DRM atomic context.\n");
++            goto err;
++        }
++    } else {
++        mp_err(p->log, "Failed to retrieve DRM fd from native display.\n");
++        goto err;
++    }
++
++    uint64_t has_prime;
++    if (drmGetCap(p->ctx->fd, DRM_CAP_PRIME, &has_prime) < 0) {
++        MP_ERR(hw, "Card does not support prime handles.\n");
++        goto err;
++    }
++
++    return 0;
++
++err:
++    uninit(hw);
++    return -1;
++}
++
++const struct ra_hwdec_driver ra_hwdec_drmprime_drm = {
++    .name = "drmprime-drm",
++    .api = HWDEC_RKMPP,
++    .priv_size = sizeof(struct priv),
++    .imgfmts = {IMGFMT_DRMPRIME, 0},
++    .init = init,
++    .overlay_frame = overlay_frame,
++    .uninit = uninit,
++};
+diff --git a/video/out/vo_drm.c b/video/out/vo_drm.c
+index 2fdd840588..04ac1cab63 100644
+--- a/video/out/vo_drm.c
++++ b/video/out/vo_drm.c
+@@ -412,7 +412,7 @@ static int preinit(struct vo *vo)
+     }
+ 
+     p->kms = kms_create(
+-        vo->log, vo->opts->drm_connector_spec, vo->opts->drm_mode_id);
++        vo->log, vo->opts->drm_connector_spec, vo->opts->drm_mode_id, vo->opts->drm_overlay_id);
+     if (!p->kms) {
+         MP_ERR(vo, "Failed to create KMS.\n");
+         goto err;
+diff --git a/wscript b/wscript
+index b50d278d41..775ec38d8b 100644
+--- a/wscript
++++ b/wscript
+@@ -592,6 +592,11 @@ video_output_features = [
+         'desc': 'DRM',
+         'deps': 'vt.h',
+         'func': check_pkg_config('libdrm'),
++    }, {
++        'name': '--drmprime',
++        'desc': 'DRM Prime ffmpeg support',
++        'func': check_statement('libavutil/pixfmt.h',
++                                'int i = AV_PIX_FMT_DRM_PRIME')
+     }, {
+         'name': '--gbm',
+         'desc': 'GBM',
+diff --git a/wscript_build.py b/wscript_build.py
+index 7f0991f13a..affb8f30d4 100644
+--- a/wscript_build.py
++++ b/wscript_build.py
+@@ -442,6 +442,7 @@ def build(ctx):
+         ( "video/out/opengl/hwdec_dxva2egl.c",   "d3d9-hwaccel" ),
+         ( "video/out/opengl/hwdec_osx.c",        "videotoolbox-gl" ),
+         ( "video/out/opengl/hwdec_ios.m",        "ios-gl" ),
++        ( "video/out/opengl/hwdec_drmprime_drm.c","drmprime && drm" ),
+         ( "video/out/opengl/hwdec_rpi.c",        "rpi" ),
+         ( "video/out/opengl/hwdec_vaegl.c",      "vaapi-egl" ),
+         ( "video/out/opengl/hwdec_vaglx.c",      "vaapi-glx" ),
+@@ -482,7 +483,9 @@ def build(ctx):
+         ( "video/out/wayland/srv-decor.c",       "wayland" ),
+         ( "video/out/win_state.c"),
+         ( "video/out/x11_common.c",              "x11" ),
++        ( "video/out/drm_atomic.c",              "drm" ),
+         ( "video/out/drm_common.c",              "drm" ),
++        ( "video/out/drm_prime.c",               "drm && drmprime" ),
+ 
+         ## osdep
+         ( getch2_c ),
+-- 
+2.14.2
+

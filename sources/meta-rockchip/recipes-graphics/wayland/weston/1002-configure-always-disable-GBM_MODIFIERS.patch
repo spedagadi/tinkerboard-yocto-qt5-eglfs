@@ -1,0 +1,27 @@
+From 91758a53bf2b8257d36e540ab3a33bb26820036a Mon Sep 17 00:00:00 2001
+From: Jacob Chen <jacob-chen@iotwrt.com>
+Date: Wed, 14 Jun 2017 17:47:05 +0800
+Subject: [PATCH] configure: always disable GBM_MODIFIERS
+
+Signed-off-by: Jacob Chen <jacob-chen@iotwrt.com>
+---
+ configure.ac | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/configure.ac b/configure.ac
+index 7632e10..1fc922d 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -217,9 +217,6 @@ if test x$enable_drm_compositor = xyes; then
+   PKG_CHECK_MODULES(DRM_COMPOSITOR_MODIFIERS, [libdrm >= 2.4.71],
+ 		    [AC_DEFINE([HAVE_DRM_ADDFB2_MODIFIERS], 1, [libdrm supports modifiers])],
+ 		    [AC_MSG_WARN([libdrm does not support AddFB2 with modifiers])])
+-  PKG_CHECK_MODULES(DRM_COMPOSITOR_GBM_MODIFIERS, [gbm >= 17.1.0],
+-		    [AC_DEFINE([HAVE_GBM_MODIFIERS], 1, [GBM supports modifiers])],
+-		    [AC_MSG_WARN([GBM does not support modifiers])])
+ fi
+ 
+ 
+-- 
+2.7.4
+

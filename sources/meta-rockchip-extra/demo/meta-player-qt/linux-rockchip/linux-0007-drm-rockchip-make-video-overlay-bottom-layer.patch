@@ -1,0 +1,25 @@
+From 998251ffa90b002379221e42d57ec21504d92b2d Mon Sep 17 00:00:00 2001
+From: LongChair <LongChair@hotmail.com>
+Date: Sun, 26 Mar 2017 15:30:16 +0200
+Subject: [PATCH 07/18] drm/rockchip: make video overlay bottom layer
+
+---
+ drivers/gpu/drm/rockchip/rockchip_vop_reg.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/rockchip/rockchip_vop_reg.c b/drivers/gpu/drm/rockchip/rockchip_vop_reg.c
+index 34a778f4c5e5..190462d9bce0 100644
+--- a/drivers/gpu/drm/rockchip/rockchip_vop_reg.c
++++ b/drivers/gpu/drm/rockchip/rockchip_vop_reg.c
+@@ -237,9 +237,9 @@ static const struct vop_ctrl rk3288_ctrl_data = {
+  */
+ static const struct vop_win_data rk3288_vop_win_data[] = {
+ 	{ .base = 0x00, .phy = &rk3288_win01_data,
+-	  .type = DRM_PLANE_TYPE_PRIMARY },
+-	{ .base = 0x40, .phy = &rk3288_win01_data,
+ 	  .type = DRM_PLANE_TYPE_OVERLAY },
++	{ .base = 0x40, .phy = &rk3288_win01_data,
++	  .type = DRM_PLANE_TYPE_PRIMARY },
+ 	{ .base = 0x00, .phy = &rk3288_win23_data,
+ 	  .type = DRM_PLANE_TYPE_OVERLAY,
+ 	  .area = rk3288_area_data,

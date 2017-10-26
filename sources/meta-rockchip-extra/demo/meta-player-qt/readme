@@ -1,0 +1,8 @@
+Machine: RK3288
+DISTRO: rk-none
+IMAGE: qt5-image
+
+Bottom video layer + transparent qt UI.
+For video playback application.
+
+The kernel patches should be modified if you don't use it with RK3288.

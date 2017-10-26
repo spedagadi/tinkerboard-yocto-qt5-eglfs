@@ -1,0 +1,26 @@
+From 9c3c2773037986dde5af74df70f390cf70fd4250 Mon Sep 17 00:00:00 2001
+From: Jacob Chen <jacob2.chen@rock-chips.com>
+Date: Fri, 12 May 2017 09:59:28 +0800
+Subject: [PATCH] show maximized window
+
+Signed-off-by: Jacob Chen <jacob2.chen@rock-chips.com>
+---
+ main.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/main.cpp b/main.cpp
+index d69a0ca..2f5bc02 100644
+--- a/main.cpp
++++ b/main.cpp
+@@ -9,7 +9,7 @@ int main(int argc, char *argv[])
+ 
+     QtQuick2ApplicationViewer viewer;
+     viewer.setMainQmlFile(QStringLiteral("qml/QtDemo/main.qml"));
+-    viewer.showExpanded();
++    viewer.showMaximized();
+ 
+     ShaderFileReader fileReader;
+     viewer.rootContext()->setContextProperty("shaderFileReader", &fileReader);
+-- 
+1.9.1
+

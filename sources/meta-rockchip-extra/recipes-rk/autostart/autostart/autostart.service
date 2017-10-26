@@ -1,0 +1,11 @@
+[Unit]
+Description=Start application at boot time
+After=multi-user.target
+
+[Service]
+RemainAfterExit=yes
+ExecStart=-/etc/init.d/autostart.sh start
+ExecStop=-/etc/init.d/autostart.sh stop
+
+[Install]
+WantedBy=multi-user.target
