@@ -8,7 +8,7 @@ Browse to the cloned directory, then type
 
    $ . ./setup-environment
    
-   $ bitbake core-image-console
+   $ bitbake core-image-base
    
 The build/local.conf file in this repo adds a number of QT5 libraries and applications. All the example apps can be found under /usr/share/
 To run each of the example apps pass **-platform eglfs** as additonal argument. 
