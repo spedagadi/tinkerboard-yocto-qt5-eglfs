@@ -18,3 +18,31 @@ EG:
    $ cd /usr/share/cinematicexperience-1.0
    
    $  ./Qt5_CinematicExperience -platform eglfs
+
+For completeness, the instructions on building toolchain and preparing QTCreator are provided below ([source](http://rockchip.wikidot.com/yocto-user-guide-qt))
+
+## Building tool chain 
+
+   $ bitbake meta-toolchain-qt5
+  
+   $ apt-get install qtcreator
+   
+   $ sh <DISTRO>-glibc-x86_64-meta-toolchain-qt5-cortexa17hf-neon-vfpv4-toolchain-2.2.1.sh
+   
+   
+## Configuring QTCreator
+
+   $ cd /opt/<DISTRO>/2.2.1
+   
+   $ . ./environment-setup-cortexa17hf-neon-vfpv4-rk-linux-gnueabi
+   
+   $ qtcreator
+
+In QtCreator go to Tools > Options > Devices and add "rockchip" as a generic linux device.
+go to Tools > Options > Build & Run and:
+
+* Add a new compiler. Select your compiler: /opt/<DISTRO>/2.2.1/sysroots/x86_64-rksdk-linux/usr/bin/arm-rk-linux-gnueabi/arm-rk-linux-gnueabi-g++
+* Add your new cross compiled Qt version by selecting the qmake located in /opt/<DISTRO>/2.2.1/sysroots/x86_64-rksdk-linux/usr/bin/qt5
+* Add a new kit selecting your new Qt5 version and compiler and setting the sysroot to /opt/<DISTRO>/2.2.1/sysroots/cortexa17hf-neon-vfpv4-rk-linux-gnueabi and set the Qt mkspec to "linux-oe-g++".
+* Finally select your "rockchip" for the device. 
+      
