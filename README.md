@@ -2,6 +2,10 @@
 
 This is a console based Yocto QT5 image for Tinkerboard using eglfs for rendering
 
+Prebuilt toolchain/SDK https://drive.google.com/open?id=0B2aU6UdMlrQbRnpEMURhRW9Ebzg
+
+Prebuilt OS image - https://drive.google.com/open?id=0B2aU6UdMlrQbQ0tTbE9VRHhDQjQ
+
 ## Building a fresh Yocto image
 
 Browse to the cloned directory, then type
