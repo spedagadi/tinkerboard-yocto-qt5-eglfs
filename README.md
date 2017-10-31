@@ -1,4 +1,4 @@
-# Tinkerboard - QT5 Yocto (Console based)
+# Tinkerboard - QT5 Yocto (Console based - Tested on Ubuntu 16.04 64 bit PC)
 
 This is a console based Yocto QT5 image for Tinkerboard using eglfs for rendering
 
